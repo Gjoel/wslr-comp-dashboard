@@ -16,6 +16,7 @@
     .most-expensive { color: #b91c1c; }
     .na { color: #9ca3af; font-style: italic; }
     .rate-cell .room { font-size: 11px; color: #64748b; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .modal-backdrop { background: rgba(15, 23, 42, 0.4); }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen">
@@ -26,9 +27,10 @@
         <h1 class="text-3xl font-bold tracking-tight">WSLR Competitor Tracker</h1>
         <p class="text-sm text-slate-500 mt-1" id="lastUpdated">Loading…</p>
       </div>
-      <div class="flex gap-2">
+      <div class="flex gap-2 items-center">
         <button id="btnPerNight" class="px-4 py-2 rounded-md font-medium text-sm bg-slate-900 text-white">Per night</button>
         <button id="btnTotal"    class="px-4 py-2 rounded-md font-medium text-sm bg-white border border-slate-300 text-slate-700">Stay total</button>
+        <span id="authArea" class="ml-2"></span>
       </div>
     </header>
 
@@ -47,7 +49,6 @@
     <div class="bg-white rounded-lg shadow-sm border border-slate-200 mt-8">
       <div class="px-6 py-4 border-b border-slate-200">
         <h2 class="text-lg font-semibold">Rate comparison by date</h2>
-        <p class="text-sm text-slate-500 mt-1">Each bar group shows one date; bars within a group are the properties.</p>
       </div>
       <div class="p-6">
         <canvas id="rateChart" height="120"></canvas>
@@ -59,59 +60,229 @@
     </footer>
   </div>
 
+  <!-- Sign-in modal -->
+  <div id="signInModal" class="fixed inset-0 modal-backdrop hidden items-center justify-center z-50">
+    <div class="bg-white rounded-lg shadow-xl max-w-md w-full p-6 m-4">
+      <h3 class="text-lg font-semibold mb-2">Sign in</h3>
+      <p class="text-sm text-slate-600 mb-4">Enter your email — we'll send you a magic link.</p>
+      <input id="signInEmail" type="email" placeholder="you@example.com" class="w-full border border-slate-300 rounded px-3 py-2 mb-4 text-sm">
+      <div id="signInMsg" class="text-sm mb-4 hidden"></div>
+      <div class="flex justify-end gap-2">
+        <button onclick="closeSignIn()" class="px-4 py-2 rounded text-sm text-slate-600 hover:bg-slate-100">Cancel</button>
+        <button onclick="sendMagicLink()" class="px-4 py-2 rounded bg-slate-900 text-white text-sm font-medium">Send link</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Admin modal -->
+  <div id="adminModal" class="fixed inset-0 modal-backdrop hidden items-center justify-center z-50 overflow-y-auto py-8">
+    <div class="bg-white rounded-lg shadow-xl max-w-3xl w-full p-6 m-4">
+      <div class="flex justify-between items-center mb-4">
+        <h3 class="text-lg font-semibold">Manage properties</h3>
+        <button onclick="closeAdmin()" class="text-slate-400 hover:text-slate-700 text-xl leading-none">×</button>
+      </div>
+
+      <div class="mb-6 p-4 bg-slate-50 rounded border border-slate-200">
+        <h4 class="font-medium mb-2 text-sm">Add a new property</h4>
+        <div class="flex flex-col gap-2">
+          <input id="newUrl" type="text" placeholder="Paste Booking.com URL (e.g. https://www.booking.com/hotel/au/some-hotel.html)" class="w-full border border-slate-300 rounded px-3 py-2 text-sm">
+          <input id="newName" type="text" placeholder="Display name (auto-filled from URL, you can edit)" class="w-full border border-slate-300 rounded px-3 py-2 text-sm">
+          <div class="flex justify-end">
+            <button onclick="addProperty()" class="px-4 py-2 rounded bg-slate-900 text-white text-sm font-medium">Add property</button>
+          </div>
+        </div>
+        <div id="adminMsg" class="text-sm mt-2 hidden"></div>
+      </div>
+
+      <h4 class="font-medium mb-2 text-sm">Current properties</h4>
+      <div id="propertyList" class="space-y-2"></div>
+    </div>
+  </div>
+
   <script>
-    // ====== CONFIG ======
+    // ====== CONFIG (injected by GitHub Actions at deploy time) ======
     const SUPABASE_URL = '__SUPABASE_URL__';
     const SUPABASE_ANON_KEY = '__SUPABASE_ANON_KEY__';
-    const WSLR_PROPERTY = 'WSLR (us)';
-    const PROPERTY_ORDER = [
-      'WSLR (us)',
-      'Novotel Wollongong',
-      'Quality Suites Pioneer Sands',
-      'Corrimal Beach Tourist Park',
-    ];
-    // ====================
+    // ================================================================
 
     const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     let unit = 'perNight';
     let allRows = [];
+    let properties = [];
+    let session = null;
     let chart = null;
 
-    function fmtAUD(n) {
-      if (n == null) return '<span class="na">—</span>';
-      return 'AU$' + Math.round(n);
-    }
+    // ---------- Helpers ----------
+    function fmtAUD(n) { if (n == null) return '<span class="na">—</span>'; return 'AU$' + Math.round(n); }
     function fmtDate(s) {
       const d = new Date(s + 'T00:00:00');
       return d.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' });
     }
-    function nightsBetween(checkIn, checkOut) {
-      return (new Date(checkOut) - new Date(checkIn)) / 86400000;
-    }
+    function nightsBetween(checkIn, checkOut) { return (new Date(checkOut) - new Date(checkIn)) / 86400000; }
     function displayRate(perNightRate, checkIn, checkOut) {
       if (perNightRate == null) return null;
       if (unit === 'perNight') return perNightRate;
       return perNightRate * nightsBetween(checkIn, checkOut);
     }
+    function parseBookingUrl(url) {
+      const m = (url || '').match(/booking\.com\/hotel\/[a-z]{2}\/([a-z0-9\-]+)\./i);
+      return m ? m[1] : null;
+    }
 
+    // ---------- Auth ----------
+    async function refreshAuth() {
+      const { data } = await sb.auth.getSession();
+      session = data.session;
+      renderAuthArea();
+    }
+    function renderAuthArea() {
+      const el = document.getElementById('authArea');
+      if (session) {
+        el.innerHTML = `
+          <button onclick="openAdmin()" class="px-4 py-2 rounded-md font-medium text-sm bg-emerald-600 text-white">Manage properties</button>
+          <button onclick="signOut()" class="ml-2 text-sm text-slate-500 hover:text-slate-800">Sign out</button>
+        `;
+      } else {
+        el.innerHTML = `<button onclick="openSignIn()" class="px-4 py-2 rounded-md font-medium text-sm bg-white border border-slate-300 text-slate-700">Sign in</button>`;
+      }
+    }
+    function openSignIn() { document.getElementById('signInModal').classList.remove('hidden'); document.getElementById('signInModal').classList.add('flex'); }
+    function closeSignIn() { document.getElementById('signInModal').classList.add('hidden'); document.getElementById('signInModal').classList.remove('flex'); document.getElementById('signInMsg').classList.add('hidden'); }
+    async function sendMagicLink() {
+      const email = document.getElementById('signInEmail').value.trim();
+      const msg = document.getElementById('signInMsg');
+      msg.classList.remove('hidden');
+      msg.className = 'text-sm mb-4 text-slate-600';
+      msg.textContent = 'Sending…';
+      const { error } = await sb.auth.signInWithOtp({
+        email,
+        options: { emailRedirectTo: window.location.origin + window.location.pathname },
+      });
+      if (error) {
+        msg.className = 'text-sm mb-4 text-rose-600';
+        msg.textContent = error.message;
+      } else {
+        msg.className = 'text-sm mb-4 text-emerald-600';
+        msg.textContent = 'Check your email and click the link to sign in.';
+      }
+    }
+    async function signOut() {
+      await sb.auth.signOut();
+      session = null;
+      renderAuthArea();
+    }
+    sb.auth.onAuthStateChange((_event, newSession) => { session = newSession; renderAuthArea(); });
+
+    // ---------- Admin ----------
+    async function openAdmin() {
+      document.getElementById('adminModal').classList.remove('hidden');
+      document.getElementById('adminModal').classList.add('flex');
+      await renderPropertyList();
+    }
+    function closeAdmin() {
+      document.getElementById('adminModal').classList.add('hidden');
+      document.getElementById('adminModal').classList.remove('flex');
+      load(); // refresh dashboard data
+    }
+    async function renderPropertyList() {
+      const { data, error } = await sb
+        .from('competitor_properties')
+        .select('*')
+        .order('display_order', { ascending: true });
+      if (error) { document.getElementById('propertyList').innerHTML = '<p class="text-rose-600 text-sm">' + error.message + '</p>'; return; }
+      document.getElementById('propertyList').innerHTML = data.map(p => `
+        <div class="flex items-center justify-between border border-slate-200 rounded p-3 ${p.is_wslr ? 'bg-emerald-50' : ''}">
+          <div class="flex-1">
+            <div class="font-medium text-sm">${p.name} ${p.is_wslr ? '<span class="text-xs text-emerald-700 ml-1">(us)</span>' : ''}</div>
+            <div class="text-xs text-slate-500">${p.slug}</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs ${p.active ? 'text-emerald-700' : 'text-slate-400'}">${p.active ? 'Active' : 'Paused'}</span>
+            <button onclick="toggleActive(${p.id}, ${!p.active})" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-100">${p.active ? 'Pause' : 'Resume'}</button>
+            ${p.is_wslr ? '' : `<button onclick="deleteProperty(${p.id}, '${p.name.replace(/'/g, "\\'")}')" class="text-xs px-2 py-1 rounded border border-rose-300 text-rose-600 hover:bg-rose-50">Delete</button>`}
+          </div>
+        </div>
+      `).join('');
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      const urlInput = document.getElementById('newUrl');
+      const nameInput = document.getElementById('newName');
+      if (urlInput) {
+        urlInput.addEventListener('input', () => {
+          const slug = parseBookingUrl(urlInput.value);
+          if (slug && !nameInput.value) {
+            // Auto-fill: convert slug to a title-cased display name as a starting point
+            nameInput.value = slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+          }
+        });
+      }
+    });
+    async function addProperty() {
+      const url = document.getElementById('newUrl').value.trim();
+      const name = document.getElementById('newName').value.trim();
+      const msg = document.getElementById('adminMsg');
+      msg.classList.remove('hidden');
+      const slug = parseBookingUrl(url);
+      if (!slug) {
+        msg.className = 'text-sm mt-2 text-rose-600';
+        msg.textContent = "Couldn't extract a Booking.com slug from that URL. It should look like https://www.booking.com/hotel/au/some-hotel.html";
+        return;
+      }
+      if (!name) {
+        msg.className = 'text-sm mt-2 text-rose-600';
+        msg.textContent = 'Please enter a display name.';
+        return;
+      }
+      const { error } = await sb.from('competitor_properties').insert({
+        name, slug, booking_url: url, display_order: 100, active: true, is_wslr: false,
+      });
+      if (error) {
+        msg.className = 'text-sm mt-2 text-rose-600';
+        msg.textContent = error.message;
+      } else {
+        msg.className = 'text-sm mt-2 text-emerald-600';
+        msg.textContent = `Added "${name}". It will appear in next week's scrape.`;
+        document.getElementById('newUrl').value = '';
+        document.getElementById('newName').value = '';
+        renderPropertyList();
+      }
+    }
+    async function toggleActive(id, newActive) {
+      const { error } = await sb.from('competitor_properties').update({ active: newActive, updated_at: new Date().toISOString() }).eq('id', id);
+      if (error) alert(error.message);
+      else renderPropertyList();
+    }
+    async function deleteProperty(id, name) {
+      if (!confirm(`Delete ${name}? Historical rates will be kept, but it'll no longer be scraped.`)) return;
+      const { error } = await sb.from('competitor_properties').delete().eq('id', id);
+      if (error) alert(error.message);
+      else renderPropertyList();
+    }
+
+    // ---------- Data ----------
     async function load() {
+      // Properties first (drives the column order and identifies WSLR)
+      const { data: props, error: pErr } = await sb
+        .from('competitor_properties')
+        .select('*')
+        .eq('active', true)
+        .order('display_order', { ascending: true });
+      if (pErr) { document.getElementById('lastUpdated').textContent = 'Error loading properties: ' + pErr.message; return; }
+      properties = props || [];
+
+      // Rates
       const since = new Date(Date.now() - 30 * 86400000).toISOString();
       const { data, error } = await sb
         .from('competitor_room_rates')
         .select('*')
         .gte('scraped_at', since)
         .order('scraped_at', { ascending: false });
-      if (error) {
-        document.getElementById('lastUpdated').textContent = 'Error loading: ' + error.message;
-        console.error(error);
-        return;
-      }
+      if (error) { document.getElementById('lastUpdated').textContent = 'Error loading rates: ' + error.message; return; }
       allRows = data || [];
       render();
     }
 
     function render() {
-      // For each (property, check_in), find the most recent scrape_run_id
       const latestRunPerKey = {};
       for (const r of allRows) {
         const k = r.property + '|' + r.check_in;
@@ -119,38 +290,31 @@
           latestRunPerKey[k] = { run: r.scrape_run_id, scraped_at: r.scraped_at };
         }
       }
-
-      // Keep only rows from the most recent run for each (property, check_in)
       const current = allRows.filter(r => {
         const k = r.property + '|' + r.check_in;
         return latestRunPerKey[k] && latestRunPerKey[k].run === r.scrape_run_id;
       });
 
-      // Pick the cheapest room per (property, check_in)
       const cheapest = {};
       for (const r of current) {
         const k = r.property + '|' + r.check_in;
         if (r.rate == null) {
-          if (!cheapest[k]) cheapest[k] = r; // keep error/unavailable record if no rate found yet
+          if (!cheapest[k]) cheapest[k] = r;
           continue;
         }
-        if (!cheapest[k] || cheapest[k].rate == null || r.rate < cheapest[k].rate) {
-          cheapest[k] = r;
-        }
+        if (!cheapest[k] || cheapest[k].rate == null || r.rate < cheapest[k].rate) cheapest[k] = r;
       }
 
-      // Group by check_in
       const byDate = {};
       for (const r of Object.values(cheapest)) {
         if (!byDate[r.check_in]) byDate[r.check_in] = {
-          check_in: r.check_in,
-          check_out: r.check_out,
+          check_in: r.check_in, check_out: r.check_out,
           stayType: r.notes?.match(/stay_type=(\w+)/)?.[1] || '',
           props: {},
         };
         byDate[r.check_in].props[r.property] = r;
       }
-      const dates = Object.values(byDate).sort((a, b) => a.check_in.localeCompare(b.check_in));
+      const dates = Object.values(byDate).sort((a, b) => a.check_in.localeCompare(b.check_in)).slice(0, 14);
 
       renderHeader(current);
       renderStats(dates);
@@ -168,39 +332,31 @@
       document.getElementById('lastUpdated').textContent = 'Last scrape: ' + d.toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' });
     }
 
-    function renderStats(dates) {
-      let cheapest = 0, expensive = 0, mid = 0, total = 0;
-      let wslrSum = 0, wslrCount = 0;
-      let compSum = 0, compCount = 0;
+    function wslrName() { const w = properties.find(p => p.is_wslr); return w ? w.name : null; }
 
+    function renderStats(dates) {
+      const wslr = wslrName();
+      let cheapest = 0, total = 0, wslrSum = 0, wslrCount = 0, compSum = 0, compCount = 0;
       for (const d of dates) {
-        const wslr = d.props[WSLR_PROPERTY];
-        const others = PROPERTY_ORDER.filter(p => p !== WSLR_PROPERTY)
-          .map(p => d.props[p])
-          .filter(r => r && r.rate != null);
-        if (!wslr || wslr.rate == null) continue;
+        const w = d.props[wslr];
+        const others = properties.filter(p => !p.is_wslr).map(p => d.props[p.name]).filter(r => r && r.rate != null);
+        if (!w || w.rate == null) continue;
         total++;
-        const w = displayRate(wslr.rate, d.check_in, d.check_out);
-        wslrSum += w; wslrCount++;
+        const wv = displayRate(w.rate, d.check_in, d.check_out);
+        wslrSum += wv; wslrCount++;
         const otherRates = others.map(r => displayRate(r.rate, d.check_in, d.check_out));
         otherRates.forEach(r => { compSum += r; compCount++; });
-        const cheaperThan = otherRates.filter(r => w < r).length;
-        if (cheaperThan === otherRates.length) cheapest++;
-        else if (cheaperThan === 0) expensive++;
-        else mid++;
+        if (otherRates.every(r => wv < r) && otherRates.length > 0) cheapest++;
       }
-
       const wslrAvg = wslrCount ? wslrSum / wslrCount : null;
       const compAvg = compCount ? compSum / compCount : null;
       const diff = (wslrAvg && compAvg) ? ((wslrAvg - compAvg) / compAvg * 100) : null;
-
       const cards = [
         { label: 'WSLR avg', value: wslrAvg != null ? 'AU$' + Math.round(wslrAvg) : '—', sub: unit === 'perNight' ? 'per night' : 'stay total' },
-        { label: 'Competitor avg', value: compAvg != null ? 'AU$' + Math.round(compAvg) : '—', sub: 'across all upcoming dates' },
+        { label: 'Competitor avg', value: compAvg != null ? 'AU$' + Math.round(compAvg) : '—', sub: 'across upcoming dates' },
         { label: 'WSLR vs competitors', value: diff != null ? (diff >= 0 ? '+' : '') + diff.toFixed(1) + '%' : '—', sub: diff != null && diff < 0 ? 'cheaper on avg' : 'more expensive', cls: diff != null && diff < 0 ? 'text-emerald-600' : 'text-rose-600' },
         { label: 'Cheapest in market', value: cheapest + '/' + total, sub: 'dates where WSLR wins' },
       ];
-
       document.getElementById('statCards').innerHTML = cards.map(c => `
         <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
           <div class="text-xs uppercase tracking-wide text-slate-500">${c.label}</div>
@@ -211,18 +367,17 @@
     }
 
     function renderTable(dates) {
+      const wslr = wslrName();
       const t = document.getElementById('snapshotTable');
-      const headers = ['Date', 'Stay', ...PROPERTY_ORDER];
-
+      const headers = ['Date', 'Stay', ...properties.map(p => p.name)];
       const rows = dates.map(d => {
-        const ratesForRow = PROPERTY_ORDER.map(p => {
-          const r = d.props[p];
+        const ratesForRow = properties.map(p => {
+          const r = d.props[p.name];
           return { prop: p, rec: r, displayed: r ? displayRate(r.rate, d.check_in, d.check_out) : null };
         });
         const valid = ratesForRow.filter(x => x.displayed != null).map(x => x.displayed);
         const min = valid.length ? Math.min(...valid) : null;
         const max = valid.length ? Math.max(...valid) : null;
-
         const cells = ratesForRow.map(({ prop, rec, displayed }) => {
           let cls = 'rate-cell text-right py-2 px-3 align-top';
           if (displayed != null && valid.length > 1) {
@@ -234,46 +389,32 @@
             const reason = rec.room_name?.replace(/[()]/g, '') || 'unavailable';
             return `<td class="${cls}"><span class="na">${reason}</span></td>`;
           }
-          return `<td class="${cls}">
-            <div class="font-semibold">${fmtAUD(displayed)}</div>
-            <div class="room" title="${rec.room_name}">${rec.room_name}</div>
-          </td>`;
+          return `<td class="${cls}"><div class="font-semibold">${fmtAUD(displayed)}</div><div class="room" title="${rec.room_name}">${rec.room_name}</div></td>`;
         }).join('');
-
-        return `<tr class="${d.props[WSLR_PROPERTY] ? 'wslr-row' : ''} border-t border-slate-100">
+        return `<tr class="${d.props[wslr] ? 'wslr-row' : ''} border-t border-slate-100">
           <td class="py-2 px-3 font-medium align-top">${fmtDate(d.check_in)}</td>
           <td class="py-2 px-3 text-slate-500 capitalize align-top">${d.stayType}</td>
           ${cells}
         </tr>`;
       }).join('');
-
-      t.innerHTML = `
-        <thead>
-          <tr class="text-left text-xs uppercase tracking-wide text-slate-500 border-b border-slate-200">
-            ${headers.map((h, i) => `<th class="py-2 px-3 ${i >= 2 ? 'text-right' : ''}">${h}</th>`).join('')}
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      `;
+      t.innerHTML = `<thead><tr class="text-left text-xs uppercase tracking-wide text-slate-500 border-b border-slate-200">
+        ${headers.map((h, i) => `<th class="py-2 px-3 ${i >= 2 ? 'text-right' : ''}">${h}</th>`).join('')}
+      </tr></thead><tbody>${rows}</tbody>`;
     }
 
     function renderChart(dates) {
       const ctx = document.getElementById('rateChart').getContext('2d');
       const labels = dates.map(d => fmtDate(d.check_in));
-      const palette = ['#10b981', '#6366f1', '#f59e0b', '#ef4444', '#0891b2'];
-      const datasets = PROPERTY_ORDER.map((p, i) => ({
-        label: p,
-        data: dates.map(d => {
-          const r = d.props[p];
-          return r ? displayRate(r.rate, d.check_in, d.check_out) : null;
-        }),
+      const palette = ['#10b981', '#6366f1', '#f59e0b', '#ef4444', '#0891b2', '#a855f7', '#14b8a6'];
+      const datasets = properties.map((p, i) => ({
+        label: p.name,
+        data: dates.map(d => { const r = d.props[p.name]; return r ? displayRate(r.rate, d.check_in, d.check_out) : null; }),
         backgroundColor: palette[i % palette.length],
         borderRadius: 4,
       }));
       if (chart) chart.destroy();
       chart = new Chart(ctx, {
-        type: 'bar',
-        data: { labels, datasets },
+        type: 'bar', data: { labels, datasets },
         options: {
           responsive: true,
           plugins: {
@@ -291,10 +432,10 @@
       document.getElementById('btnTotal').className = 'px-4 py-2 rounded-md font-medium text-sm ' + (u === 'total' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-300 text-slate-700');
       render();
     }
-
     document.getElementById('btnPerNight').addEventListener('click', () => setUnit('perNight'));
     document.getElementById('btnTotal').addEventListener('click', () => setUnit('total'));
 
+    refreshAuth();
     load();
   </script>
 </body>
