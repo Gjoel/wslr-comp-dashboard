@@ -12,15 +12,15 @@
   <style>
     body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
     .wslr-row { background-color: #ecfdf5; }
-    .cheapest { background-color: #d1fae5; font-weight: 600; }
+    .cheapest { background-color: #d1fae5; }
     .most-expensive { color: #b91c1c; }
     .na { color: #9ca3af; font-style: italic; }
+    .rate-cell .room { font-size: 11px; color: #64748b; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen">
   <div class="max-w-7xl mx-auto p-6">
 
-    <!-- Header -->
     <header class="mb-8 flex items-start justify-between flex-wrap gap-4">
       <div>
         <h1 class="text-3xl font-bold tracking-tight">WSLR Competitor Tracker</h1>
@@ -28,25 +28,22 @@
       </div>
       <div class="flex gap-2">
         <button id="btnPerNight" class="px-4 py-2 rounded-md font-medium text-sm bg-slate-900 text-white">Per night</button>
-        <button id="btnTotal"    class="px-4 py-2 rounded-md font-medium text-sm bg-white border border-slate-300 text-slate-700">2-night total</button>
+        <button id="btnTotal"    class="px-4 py-2 rounded-md font-medium text-sm bg-white border border-slate-300 text-slate-700">Stay total</button>
       </div>
     </header>
 
-    <!-- Stat cards -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8" id="statCards"></div>
 
-    <!-- Snapshot table -->
     <div class="bg-white rounded-lg shadow-sm border border-slate-200">
       <div class="px-6 py-4 border-b border-slate-200">
         <h2 class="text-lg font-semibold">Upcoming date snapshot</h2>
-        <p class="text-sm text-slate-500 mt-1">Latest rate for each property × date. Cheapest in green, WSLR row highlighted.</p>
+        <p class="text-sm text-slate-500 mt-1">Cheapest room per property per date. Room name shown beneath each rate.</p>
       </div>
       <div class="overflow-x-auto p-6">
         <table class="w-full text-sm" id="snapshotTable"></table>
       </div>
     </div>
 
-    <!-- Chart -->
     <div class="bg-white rounded-lg shadow-sm border border-slate-200 mt-8">
       <div class="px-6 py-4 border-b border-slate-200">
         <h2 class="text-lg font-semibold">Rate comparison by date</h2>
@@ -65,7 +62,7 @@
   <script>
     // ====== CONFIG ======
     const SUPABASE_URL = 'https://fbiqmfxxqgykpmnfggxj.supabase.co';
-    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZiaXFtZnh4cWd5a3BtbmZnZ3hqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyMDIyMDksImV4cCI6MjA5NDc3ODIwOX0.BaOxgYGXMkHG31emN0RNKS3qN9IJ3u_6buILa-Mm8tQ';
+    const SUPABASE_ANON_KEY = 'PASTE_ANON_KEY_HERE';
     const WSLR_PROPERTY = 'WSLR (us)';
     const PROPERTY_ORDER = [
       'WSLR (us)',
@@ -78,12 +75,12 @@
 
     const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     let unit = 'perNight';
-    let allRates = [];
+    let allRows = [];
     let chart = null;
 
     function fmtAUD(n) {
       if (n == null) return '<span class="na">—</span>';
-      return 'AU$' + n.toFixed(0);
+      return 'AU$' + Math.round(n);
     }
     function fmtDate(s) {
       const d = new Date(s + 'T00:00:00');
@@ -92,17 +89,16 @@
     function nightsBetween(checkIn, checkOut) {
       return (new Date(checkOut) - new Date(checkIn)) / 86400000;
     }
-    function ratePerUnit(r) {
-      if (!r || r.rate == null) return null;
-      if (unit === 'total') return Number(r.rate);
-      const n = nightsBetween(r.check_in, r.check_out) || 1;
-      return Number(r.rate) / n;
+    function displayRate(perNightRate, checkIn, checkOut) {
+      if (perNightRate == null) return null;
+      if (unit === 'perNight') return perNightRate;
+      return perNightRate * nightsBetween(checkIn, checkOut);
     }
 
     async function load() {
       const since = new Date(Date.now() - 30 * 86400000).toISOString();
       const { data, error } = await sb
-        .from('competitor_rates')
+        .from('competitor_room_rates')
         .select('*')
         .gte('scraped_at', since)
         .order('scraped_at', { ascending: false });
@@ -111,46 +107,70 @@
         console.error(error);
         return;
       }
-      allRates = data || [];
+      allRows = data || [];
       render();
     }
 
     function render() {
-      // Latest scrape per (property, check_in)
-      const latest = {};
-      for (const r of allRates) {
+      // For each (property, check_in), find the most recent scrape_run_id
+      const latestRunPerKey = {};
+      for (const r of allRows) {
         const k = r.property + '|' + r.check_in;
-        if (!latest[k]) latest[k] = r;
+        if (!latestRunPerKey[k] || r.scraped_at > latestRunPerKey[k].scraped_at) {
+          latestRunPerKey[k] = { run: r.scrape_run_id, scraped_at: r.scraped_at };
+        }
       }
-      const records = Object.values(latest);
+
+      // Keep only rows from the most recent run for each (property, check_in)
+      const current = allRows.filter(r => {
+        const k = r.property + '|' + r.check_in;
+        return latestRunPerKey[k] && latestRunPerKey[k].run === r.scrape_run_id;
+      });
+
+      // Pick the cheapest room per (property, check_in)
+      const cheapest = {};
+      for (const r of current) {
+        const k = r.property + '|' + r.check_in;
+        if (r.rate == null) {
+          if (!cheapest[k]) cheapest[k] = r; // keep error/unavailable record if no rate found yet
+          continue;
+        }
+        if (!cheapest[k] || cheapest[k].rate == null || r.rate < cheapest[k].rate) {
+          cheapest[k] = r;
+        }
+      }
 
       // Group by check_in
       const byDate = {};
-      for (const r of records) {
-        if (!byDate[r.check_in]) byDate[r.check_in] = { check_in: r.check_in, check_out: r.check_out, stayType: r.notes?.match(/stay_type=(\w+)/)?.[1] || '', props: {} };
+      for (const r of Object.values(cheapest)) {
+        if (!byDate[r.check_in]) byDate[r.check_in] = {
+          check_in: r.check_in,
+          check_out: r.check_out,
+          stayType: r.notes?.match(/stay_type=(\w+)/)?.[1] || '',
+          props: {},
+        };
         byDate[r.check_in].props[r.property] = r;
       }
       const dates = Object.values(byDate).sort((a, b) => a.check_in.localeCompare(b.check_in));
 
-      renderHeader(records);
+      renderHeader(current);
       renderStats(dates);
       renderTable(dates);
       renderChart(dates);
     }
 
-    function renderHeader(records) {
-      if (records.length === 0) {
-        document.getElementById('lastUpdated').textContent = 'No data yet — wait for the next scheduled scrape.';
+    function renderHeader(rows) {
+      if (rows.length === 0) {
+        document.getElementById('lastUpdated').textContent = 'No data yet — run the scraper to populate the table.';
         return;
       }
-      const latestScrape = records.reduce((max, r) => r.scraped_at > max ? r.scraped_at : max, records[0].scraped_at);
+      const latestScrape = rows.reduce((max, r) => r.scraped_at > max ? r.scraped_at : max, rows[0].scraped_at);
       const d = new Date(latestScrape);
       document.getElementById('lastUpdated').textContent = 'Last scrape: ' + d.toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' });
     }
 
     function renderStats(dates) {
-      // Compute WSLR position across dates
-      let cheapest = 0, mid = 0, expensive = 0, total = 0;
+      let cheapest = 0, expensive = 0, mid = 0, total = 0;
       let wslrSum = 0, wslrCount = 0;
       let compSum = 0, compCount = 0;
 
@@ -161,9 +181,9 @@
           .filter(r => r && r.rate != null);
         if (!wslr || wslr.rate == null) continue;
         total++;
-        const w = ratePerUnit(wslr);
+        const w = displayRate(wslr.rate, d.check_in, d.check_out);
         wslrSum += w; wslrCount++;
-        const otherRates = others.map(ratePerUnit);
+        const otherRates = others.map(r => displayRate(r.rate, d.check_in, d.check_out));
         otherRates.forEach(r => { compSum += r; compCount++; });
         const cheaperThan = otherRates.filter(r => w < r).length;
         if (cheaperThan === otherRates.length) cheapest++;
@@ -176,10 +196,10 @@
       const diff = (wslrAvg && compAvg) ? ((wslrAvg - compAvg) / compAvg * 100) : null;
 
       const cards = [
-        { label: 'WSLR avg', value: wslrAvg != null ? 'AU$' + wslrAvg.toFixed(0) : '—', sub: unit === 'perNight' ? 'per night' : '2-night total' },
-        { label: 'Competitor avg', value: compAvg != null ? 'AU$' + compAvg.toFixed(0) : '—', sub: 'across all upcoming dates' },
+        { label: 'WSLR avg', value: wslrAvg != null ? 'AU$' + Math.round(wslrAvg) : '—', sub: unit === 'perNight' ? 'per night' : 'stay total' },
+        { label: 'Competitor avg', value: compAvg != null ? 'AU$' + Math.round(compAvg) : '—', sub: 'across all upcoming dates' },
         { label: 'WSLR vs competitors', value: diff != null ? (diff >= 0 ? '+' : '') + diff.toFixed(1) + '%' : '—', sub: diff != null && diff < 0 ? 'cheaper on avg' : 'more expensive', cls: diff != null && diff < 0 ? 'text-emerald-600' : 'text-rose-600' },
-        { label: 'Cheapest in market', value: cheapest + '/' + total, sub: 'dates where WSLR wins on price' },
+        { label: 'Cheapest in market', value: cheapest + '/' + total, sub: 'dates where WSLR wins' },
       ];
 
       document.getElementById('statCards').innerHTML = cards.map(c => `
@@ -194,27 +214,36 @@
     function renderTable(dates) {
       const t = document.getElementById('snapshotTable');
       const headers = ['Date', 'Stay', ...PROPERTY_ORDER];
-      const rows = dates.map(d => {
-        // Find cheapest among the props for this row
-        const ratesForRow = PROPERTY_ORDER.map(p => ({ prop: p, rate: ratePerUnit(d.props[p]) }));
-        const validRates = ratesForRow.filter(x => x.rate != null).map(x => x.rate);
-        const min = validRates.length ? Math.min(...validRates) : null;
-        const max = validRates.length ? Math.max(...validRates) : null;
 
-        const cells = PROPERTY_ORDER.map(p => {
+      const rows = dates.map(d => {
+        const ratesForRow = PROPERTY_ORDER.map(p => {
           const r = d.props[p];
-          const v = ratePerUnit(r);
-          let cls = 'text-right py-2 px-3';
-          if (v != null) {
-            if (v === min && validRates.length > 1) cls += ' cheapest';
-            else if (v === max && validRates.length > 1) cls += ' most-expensive';
+          return { prop: p, rec: r, displayed: r ? displayRate(r.rate, d.check_in, d.check_out) : null };
+        });
+        const valid = ratesForRow.filter(x => x.displayed != null).map(x => x.displayed);
+        const min = valid.length ? Math.min(...valid) : null;
+        const max = valid.length ? Math.max(...valid) : null;
+
+        const cells = ratesForRow.map(({ prop, rec, displayed }) => {
+          let cls = 'rate-cell text-right py-2 px-3 align-top';
+          if (displayed != null && valid.length > 1) {
+            if (displayed === min) cls += ' cheapest';
+            else if (displayed === max) cls += ' most-expensive';
           }
-          return `<td class="${cls}">${fmtAUD(v)}</td>`;
+          if (!rec) return `<td class="${cls}">${fmtAUD(null)}</td>`;
+          if (rec.rate == null) {
+            const reason = rec.room_name?.replace(/[()]/g, '') || 'unavailable';
+            return `<td class="${cls}"><span class="na">${reason}</span></td>`;
+          }
+          return `<td class="${cls}">
+            <div class="font-semibold">${fmtAUD(displayed)}</div>
+            <div class="room" title="${rec.room_name}">${rec.room_name}</div>
+          </td>`;
         }).join('');
 
         return `<tr class="${d.props[WSLR_PROPERTY] ? 'wslr-row' : ''} border-t border-slate-100">
-          <td class="py-2 px-3 font-medium">${fmtDate(d.check_in)}</td>
-          <td class="py-2 px-3 text-slate-500 capitalize">${d.stayType}</td>
+          <td class="py-2 px-3 font-medium align-top">${fmtDate(d.check_in)}</td>
+          <td class="py-2 px-3 text-slate-500 capitalize align-top">${d.stayType}</td>
           ${cells}
         </tr>`;
       }).join('');
@@ -235,7 +264,10 @@
       const palette = ['#10b981', '#6366f1', '#f59e0b', '#ef4444', '#0891b2'];
       const datasets = PROPERTY_ORDER.map((p, i) => ({
         label: p,
-        data: dates.map(d => ratePerUnit(d.props[p])),
+        data: dates.map(d => {
+          const r = d.props[p];
+          return r ? displayRate(r.rate, d.check_in, d.check_out) : null;
+        }),
         backgroundColor: palette[i % palette.length],
         borderRadius: 4,
       }));
@@ -247,11 +279,9 @@
           responsive: true,
           plugins: {
             legend: { position: 'bottom' },
-            tooltip: { callbacks: { label: c => c.dataset.label + ': AU$' + (c.parsed.y != null ? c.parsed.y.toFixed(0) : '—') } },
+            tooltip: { callbacks: { label: c => c.dataset.label + ': AU$' + (c.parsed.y != null ? Math.round(c.parsed.y) : '—') } },
           },
-          scales: {
-            y: { beginAtZero: false, ticks: { callback: v => 'AU$' + v } },
-          },
+          scales: { y: { beginAtZero: false, ticks: { callback: v => 'AU$' + v } } },
         },
       });
     }
