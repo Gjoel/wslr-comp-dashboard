@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WSLR Competitor Tracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+    .wslr-row { background-color: #ecfdf5; }
+    .cheapest { background-color: #d1fae5; font-weight: 600; }
+    .most-expensive { color: #b91c1c; }
+    .na { color: #9ca3af; font-style: italic; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen">
+  <div class="max-w-7xl mx-auto p-6">
+
+    <!-- Header -->
+    <header class="mb-8 flex items-start justify-between flex-wrap gap-4">
+      <div>
+        <h1 class="text-3xl font-bold tracking-tight">WSLR Competitor Tracker</h1>
+        <p class="text-sm text-slate-500 mt-1" id="lastUpdated">Loading…</p>
+      </div>
+      <div class="flex gap-2">
+        <button id="btnPerNight" class="px-4 py-2 rounded-md font-medium text-sm bg-slate-900 text-white">Per night</button>
+        <button id="btnTotal"    class="px-4 py-2 rounded-md font-medium text-sm bg-white border border-slate-300 text-slate-700">2-night total</button>
+      </div>
+    </header>
+
+    <!-- Stat cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8" id="statCards"></div>
+
+    <!-- Snapshot table -->
+    <div class="bg-white rounded-lg shadow-sm border border-slate-200">
+      <div class="px-6 py-4 border-b border-slate-200">
+        <h2 class="text-lg font-semibold">Upcoming date snapshot</h2>
+        <p class="text-sm text-slate-500 mt-1">Latest rate for each property × date. Cheapest in green, WSLR row highlighted.</p>
+      </div>
+      <div class="overflow-x-auto p-6">
+        <table class="w-full text-sm" id="snapshotTable"></table>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div class="bg-white rounded-lg shadow-sm border border-slate-200 mt-8">
+      <div class="px-6 py-4 border-b border-slate-200">
+        <h2 class="text-lg font-semibold">Rate comparison by date</h2>
+        <p class="text-sm text-slate-500 mt-1">Each bar group shows one date; bars within a group are the properties.</p>
+      </div>
+      <div class="p-6">
+        <canvas id="rateChart" height="120"></canvas>
+      </div>
+    </div>
+
+    <footer class="text-center text-xs text-slate-400 mt-8 pb-8">
+      Data scraped weekly from booking.com · WSLR internal tool
+    </footer>
+  </div>
+
+  <script>
+    // ====== CONFIG ======
+    const SUPABASE_URL = 'https://fbiqmfxxqgykpmnfggxj.supabase.co';
+    const SUPABASE_ANON_KEY = 'PASTE_ANON_KEY_HERE';
+    const WSLR_PROPERTY = 'WSLR (us)';
+    const PROPERTY_ORDER = [
+      'WSLR (us)',
+      'Novotel Wollongong',
+      'Quality Suites Pioneer Sands',
+      'Sage Hotel Wollongong',
+      'Corrimal Beach Tourist Park',
+    ];
+    // ====================
+
+    const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    let unit = 'perNight';
+    let allRates = [];
+    let chart = null;
+
+    function fmtAUD(n) {
+      if (n == null) return '<span class="na">—</span>';
+      return 'AU$' + n.toFixed(0);
+    }
+    function fmtDate(s) {
+      const d = new Date(s + 'T00:00:00');
+      return d.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' });
+    }
+    function nightsBetween(checkIn, checkOut) {
+      return (new Date(checkOut) - new Date(checkIn)) / 86400000;
+    }
+    function ratePerUnit(r) {
+      if (!r || r.rate == null) return null;
+      if (unit === 'total') return Number(r.rate);
+      const n = nightsBetween(r.check_in, r.check_out) || 1;
+      return Number(r.rate) / n;
+    }
+
+    async function load() {
+      const since = new Date(Date.now() - 30 * 86400000).toISOString();
+      const { data, error } = await sb
+        .from('competitor_rates')
+        .select('*')
+        .gte('scraped_at', since)
+        .order('scraped_at', { ascending: false });
+      if (error) {
+        document.getElementById('lastUpdated').textContent = 'Error loading: ' + error.message;
+        console.error(error);
+        return;
+      }
+      allRates = data || [];
+      render();
+    }
+
+    function render() {
+      // Latest scrape per (property, check_in)
+      const latest = {};
+      for (const r of allRates) {
+        const k = r.property + '|' + r.check_in;
+        if (!latest[k]) latest[k] = r;
+      }
+      const records = Object.values(latest);
+
+      // Group by check_in
+      const byDate = {};
+      for (const r of records) {
+        if (!byDate[r.check_in]) byDate[r.check_in] = { check_in: r.check_in, check_out: r.check_out, stayType: r.notes?.match(/stay_type=(\w+)/)?.[1] || '', props: {} };
+        byDate[r.check_in].props[r.property] = r;
+      }
+      const dates = Object.values(byDate).sort((a, b) => a.check_in.localeCompare(b.check_in));
+
+      renderHeader(records);
+      renderStats(dates);
+      renderTable(dates);
+      renderChart(dates);
+    }
+
+    function renderHeader(records) {
+      if (records.length === 0) {
+        document.getElementById('lastUpdated').textContent = 'No data yet — wait for the next scheduled scrape.';
+        return;
+      }
+      const latestScrape = records.reduce((max, r) => r.scraped_at > max ? r.scraped_at : max, records[0].scraped_at);
+      const d = new Date(latestScrape);
+      document.getElementById('lastUpdated').textContent = 'Last scrape: ' + d.toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' });
+    }
+
+    function renderStats(dates) {
+      // Compute WSLR position across dates
+      let cheapest = 0, mid = 0, expensive = 0, total = 0;
+      let wslrSum = 0, wslrCount = 0;
+      let compSum = 0, compCount = 0;
+
+      for (const d of dates) {
+        const wslr = d.props[WSLR_PROPERTY];
+        const others = PROPERTY_ORDER.filter(p => p !== WSLR_PROPERTY)
+          .map(p => d.props[p])
+          .filter(r => r && r.rate != null);
+        if (!wslr || wslr.rate == null) continue;
+        total++;
+        const w = ratePerUnit(wslr);
+        wslrSum += w; wslrCount++;
+        const otherRates = others.map(ratePerUnit);
+        otherRates.forEach(r => { compSum += r; compCount++; });
+        const cheaperThan = otherRates.filter(r => w < r).length;
+        if (cheaperThan === otherRates.length) cheapest++;
+        else if (cheaperThan === 0) expensive++;
+        else mid++;
+      }
+
+      const wslrAvg = wslrCount ? wslrSum / wslrCount : null;
+      const compAvg = compCount ? compSum / compCount : null;
+      const diff = (wslrAvg && compAvg) ? ((wslrAvg - compAvg) / compAvg * 100) : null;
+
+      const cards = [
+        { label: 'WSLR avg', value: wslrAvg != null ? 'AU$' + wslrAvg.toFixed(0) : '—', sub: unit === 'perNight' ? 'per night' : '2-night total' },
+        { label: 'Competitor avg', value: compAvg != null ? 'AU$' + compAvg.toFixed(0) : '—', sub: 'across all upcoming dates' },
+        { label: 'WSLR vs competitors', value: diff != null ? (diff >= 0 ? '+' : '') + diff.toFixed(1) + '%' : '—', sub: diff != null && diff < 0 ? 'cheaper on avg' : 'more expensive', cls: diff != null && diff < 0 ? 'text-emerald-600' : 'text-rose-600' },
+        { label: 'Cheapest in market', value: cheapest + '/' + total, sub: 'dates where WSLR wins on price' },
+      ];
+
+      document.getElementById('statCards').innerHTML = cards.map(c => `
+        <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+          <div class="text-xs uppercase tracking-wide text-slate-500">${c.label}</div>
+          <div class="text-2xl font-bold mt-2 ${c.cls || ''}">${c.value}</div>
+          <div class="text-xs text-slate-500 mt-1">${c.sub}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderTable(dates) {
+      const t = document.getElementById('snapshotTable');
+      const headers = ['Date', 'Stay', ...PROPERTY_ORDER];
+      const rows = dates.map(d => {
+        // Find cheapest among the props for this row
+        const ratesForRow = PROPERTY_ORDER.map(p => ({ prop: p, rate: ratePerUnit(d.props[p]) }));
+        const validRates = ratesForRow.filter(x => x.rate != null).map(x => x.rate);
+        const min = validRates.length ? Math.min(...validRates) : null;
+        const max = validRates.length ? Math.max(...validRates) : null;
+
+        const cells = PROPERTY_ORDER.map(p => {
+          const r = d.props[p];
+          const v = ratePerUnit(r);
+          let cls = 'text-right py-2 px-3';
+          if (v != null) {
+            if (v === min && validRates.length > 1) cls += ' cheapest';
+            else if (v === max && validRates.length > 1) cls += ' most-expensive';
+          }
+          return `<td class="${cls}">${fmtAUD(v)}</td>`;
+        }).join('');
+
+        return `<tr class="${d.props[WSLR_PROPERTY] ? 'wslr-row' : ''} border-t border-slate-100">
+          <td class="py-2 px-3 font-medium">${fmtDate(d.check_in)}</td>
+          <td class="py-2 px-3 text-slate-500 capitalize">${d.stayType}</td>
+          ${cells}
+        </tr>`;
+      }).join('');
+
+      t.innerHTML = `
+        <thead>
+          <tr class="text-left text-xs uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            ${headers.map((h, i) => `<th class="py-2 px-3 ${i >= 2 ? 'text-right' : ''}">${h}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      `;
+    }
+
+    function renderChart(dates) {
+      const ctx = document.getElementById('rateChart').getContext('2d');
+      const labels = dates.map(d => fmtDate(d.check_in));
+      const palette = ['#10b981', '#6366f1', '#f59e0b', '#ef4444', '#0891b2'];
+      const datasets = PROPERTY_ORDER.map((p, i) => ({
+        label: p,
+        data: dates.map(d => ratePerUnit(d.props[p])),
+        backgroundColor: palette[i % palette.length],
+        borderRadius: 4,
+      }));
+      if (chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type: 'bar',
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { position: 'bottom' },
+            tooltip: { callbacks: { label: c => c.dataset.label + ': AU$' + (c.parsed.y != null ? c.parsed.y.toFixed(0) : '—') } },
+          },
+          scales: {
+            y: { beginAtZero: false, ticks: { callback: v => 'AU$' + v } },
+          },
+        },
+      });
+    }
+
+    function setUnit(u) {
+      unit = u;
+      document.getElementById('btnPerNight').className = 'px-4 py-2 rounded-md font-medium text-sm ' + (u === 'perNight' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-300 text-slate-700');
+      document.getElementById('btnTotal').className = 'px-4 py-2 rounded-md font-medium text-sm ' + (u === 'total' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-300 text-slate-700');
+      render();
+    }
+
+    document.getElementById('btnPerNight').addEventListener('click', () => setUnit('perNight'));
+    document.getElementById('btnTotal').addEventListener('click', () => setUnit('total'));
+
+    load();
+  </script>
+</body>
+</html>
