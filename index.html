@@ -17,6 +17,42 @@
     .na { color: #9ca3af; font-style: italic; }
     .rate-cell .room { font-size: 11px; color: #64748b; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .modal-backdrop { background: rgba(15, 23, 42, 0.4); }
+
+    /* Heatmap */
+    .heatmap-scroll { overflow-x: auto; border-radius: 8px; }
+    .heatmap-inner { display: inline-block; min-width: 100%; }
+    .heat-row { display: flex; align-items: stretch; }
+    .heat-row .row-label {
+      width: 180px; flex-shrink: 0; padding: 6px 10px; font-size: 12px; font-weight: 500;
+      position: sticky; left: 0; background: white; z-index: 2;
+      border-right: 1px solid #e2e8f0; display: flex; align-items: center;
+    }
+    .heat-row .row-label.wslr { background: #ecfdf5; }
+    .heat-row .cells-container { display: flex; flex-wrap: nowrap; }
+    .heat-cell {
+      width: 18px; height: 30px; flex-shrink: 0;
+      border-right: 1px solid white; cursor: default; position: relative;
+    }
+    .heat-cell.empty { background: #f8fafc; }
+    .heat-cell.sold-out { background: #1e293b; }
+    .heat-cell.sold-out::after {
+      content: '×'; color: rgba(255,255,255,0.6);
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px;
+    }
+    .heat-cell:hover { outline: 2px solid #0f172a; outline-offset: -1px; z-index: 1; }
+    .header-row .row-label { background: white; }
+    .month-label {
+      height: 22px; font-size: 11px; font-weight: 600; color: #475569;
+      display: flex; align-items: center; justify-content: flex-start; padding-left: 4px;
+      border-right: 1px solid #e2e8f0; text-transform: uppercase; flex-shrink: 0;
+    }
+    .day-label {
+      width: 18px; height: 20px; font-size: 9px; color: #94a3b8;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+      border-right: 1px solid white;
+    }
+    .day-label.weekend { color: #0f172a; font-weight: 600; background: #f1f5f9; }
+    .legend-swatch { display: inline-block; width: 14px; height: 14px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen">
@@ -34,8 +70,10 @@
       </div>
     </header>
 
+    <!-- 14-day stat cards -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8" id="statCards"></div>
 
+    <!-- 14-day snapshot table -->
     <div class="bg-white rounded-lg shadow-sm border border-slate-200">
       <div class="px-6 py-4 border-b border-slate-200">
         <h2 class="text-lg font-semibold">Upcoming date snapshot</h2>
@@ -46,12 +84,39 @@
       </div>
     </div>
 
+    <!-- 14-day chart -->
     <div class="bg-white rounded-lg shadow-sm border border-slate-200 mt-8">
       <div class="px-6 py-4 border-b border-slate-200">
         <h2 class="text-lg font-semibold">Rate comparison by date</h2>
       </div>
       <div class="p-6">
         <canvas id="rateChart" height="120"></canvas>
+      </div>
+    </div>
+
+    <!-- 6-month outlook -->
+    <div class="bg-white rounded-lg shadow-sm border border-slate-200 mt-8">
+      <div class="px-6 py-4 border-b border-slate-200">
+        <h2 class="text-lg font-semibold">6-month market view</h2>
+        <p class="text-sm text-slate-500 mt-1">Long-range pricing patterns across all tracked properties.</p>
+      </div>
+      <div class="p-6">
+        <div id="longRangeStats"></div>
+
+        <div class="flex items-center justify-between mb-3 mt-2 flex-wrap gap-2">
+          <div>
+            <label class="text-xs uppercase tracking-wide text-slate-500 mr-2">Colour by</label>
+            <select id="heatmapMode" class="text-sm border border-slate-300 rounded px-2 py-1">
+              <option value="absolute">Absolute rate</option>
+              <option value="vsMedian">Deviation from market median</option>
+            </select>
+          </div>
+          <div class="text-xs text-slate-500" id="heatmapLegend"></div>
+        </div>
+
+        <div id="heatmapContainer"></div>
+
+        <div id="insightsContainer" class="mt-8"></div>
       </div>
     </div>
 
@@ -96,6 +161,7 @@
     let allRows = [];
     let properties = [];
     let chart = null;
+    let cachedDateMap = null;
 
     // ---------- Helpers ----------
     function fmtAUD(n) { if (n == null) return '<span class="na">—</span>'; return 'AU$' + Math.round(n); }
@@ -119,6 +185,7 @@
       const m = (url || '').match(/booking\.com\/hotel\/[a-z]{2}\/([a-z0-9\-]+)\./i);
       return m ? m[1] : null;
     }
+    function wslrName() { const w = properties.find(p => p.is_wslr); return w ? w.name : null; }
 
     // ---------- Admin ----------
     async function openAdmin() {
@@ -215,23 +282,28 @@
       if (pErr) { document.getElementById('lastUpdated').textContent = 'Error loading properties: ' + pErr.message; return; }
       properties = props || [];
 
+      // Fetch ~200 days of data (more than 6 months) for the long-range heatmap.
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const futureDate = new Date(today);
-      futureDate.setDate(futureDate.getDate() + 30);
+      futureDate.setDate(futureDate.getDate() + 200);
       const { data, error } = await sb
         .from('competitor_room_rates')
         .select('*')
         .gte('check_in', fmtYMD(today))
         .lte('check_in', fmtYMD(futureDate))
         .order('check_in', { ascending: true })
-        .limit(5000);
+        .limit(20000);
       if (error) { document.getElementById('lastUpdated').textContent = 'Error loading rates: ' + error.message; return; }
       allRows = data || [];
+      cachedDateMap = null;
       render();
     }
 
-    function render() {
+    // Build {date -> {property -> cheapestRow}} from latest scrape per (property, date)
+    function buildDateMap() {
+      if (cachedDateMap) return cachedDateMap;
+
       const latestRunPerKey = {};
       for (const r of allRows) {
         const k = r.property + '|' + r.check_in;
@@ -243,17 +315,12 @@
         const k = r.property + '|' + r.check_in;
         return latestRunPerKey[k] && latestRunPerKey[k].run === r.scrape_run_id;
       });
-
       const cheapest = {};
       for (const r of current) {
         const k = r.property + '|' + r.check_in;
-        if (r.rate == null) {
-          if (!cheapest[k]) cheapest[k] = r;
-          continue;
-        }
+        if (r.rate == null) { if (!cheapest[k]) cheapest[k] = r; continue; }
         if (!cheapest[k] || cheapest[k].rate == null || r.rate < cheapest[k].rate) cheapest[k] = r;
       }
-
       const byDate = {};
       for (const r of Object.values(cheapest)) {
         if (!byDate[r.check_in]) byDate[r.check_in] = {
@@ -263,12 +330,25 @@
         };
         byDate[r.check_in].props[r.property] = r;
       }
-      const dates = Object.values(byDate).sort((a, b) => a.check_in.localeCompare(b.check_in)).slice(0, 14);
+      cachedDateMap = {
+        allDates: Object.values(byDate).sort((a, b) => a.check_in.localeCompare(b.check_in)),
+        currentRows: current,
+      };
+      return cachedDateMap;
+    }
 
-      renderHeader(current);
-      renderStats(dates);
-      renderTable(dates);
-      renderChart(dates);
+    function render() {
+      const { allDates, currentRows } = buildDateMap();
+      const next14 = allDates.slice(0, 14);
+
+      renderHeader(currentRows);
+      renderStats(next14);
+      renderTable(next14);
+      renderChart(next14);
+
+      renderLongRangeStats(allDates);
+      renderHeatmap(allDates);
+      renderInsights(allDates);
     }
 
     function renderHeader(rows) {
@@ -280,8 +360,6 @@
       const d = new Date(latestScrape);
       document.getElementById('lastUpdated').textContent = 'Last scrape: ' + d.toLocaleString('en-AU', { dateStyle: 'medium', timeStyle: 'short' });
     }
-
-    function wslrName() { const w = properties.find(p => p.is_wslr); return w ? w.name : null; }
 
     function renderStats(dates) {
       const wslr = wslrName();
@@ -301,8 +379,8 @@
       const compAvg = compCount ? compSum / compCount : null;
       const diff = (wslrAvg && compAvg) ? ((wslrAvg - compAvg) / compAvg * 100) : null;
       const cards = [
-        { label: 'WSLR avg', value: wslrAvg != null ? 'AU$' + Math.round(wslrAvg) : '—', sub: unit === 'perNight' ? 'per night' : 'stay total' },
-        { label: 'Competitor avg', value: compAvg != null ? 'AU$' + Math.round(compAvg) : '—', sub: 'across upcoming dates' },
+        { label: 'WSLR avg (14d)', value: wslrAvg != null ? 'AU$' + Math.round(wslrAvg) : '—', sub: unit === 'perNight' ? 'per night' : 'stay total' },
+        { label: 'Competitor avg (14d)', value: compAvg != null ? 'AU$' + Math.round(compAvg) : '—', sub: 'across upcoming dates' },
         { label: 'WSLR vs competitors', value: diff != null ? (diff >= 0 ? '+' : '') + diff.toFixed(1) + '%' : '—', sub: diff != null && diff < 0 ? 'cheaper on avg' : 'more expensive', cls: diff != null && diff < 0 ? 'text-emerald-600' : 'text-rose-600' },
         { label: 'Cheapest in market', value: cheapest + '/' + total, sub: 'dates where WSLR wins' },
       ];
@@ -375,6 +453,239 @@
       });
     }
 
+    // ---------- 6-month outlook ----------
+    function calcLongRangeStats(allDates) {
+      const wslr = wslrName();
+      const compProps = properties.filter(p => !p.is_wslr);
+      const soldOutCount = {};
+      properties.forEach(p => soldOutCount[p.name] = 0);
+
+      let wslrCheapest = 0, wslrMidMarket = 0, wslrMostExpensive = 0, wslrComparable = 0;
+      const opportunityDates = [];
+      const overpriceDates = [];
+
+      for (const d of allDates) {
+        properties.forEach(p => {
+          const r = d.props[p.name];
+          if (!r || r.rate == null) soldOutCount[p.name]++;
+        });
+
+        const wslrR = d.props[wslr];
+        if (!wslrR || wslrR.rate == null) continue;
+
+        const otherRates = compProps
+          .map(p => d.props[p.name])
+          .filter(r => r && r.rate != null)
+          .map(r => r.rate);
+        if (otherRates.length === 0) continue;
+
+        wslrComparable++;
+        const sortedOther = [...otherRates].sort((a, b) => a - b);
+        const minOther = sortedOther[0];
+        const maxOther = sortedOther[sortedOther.length - 1];
+        const medianOther = sortedOther[Math.floor(sortedOther.length / 2)];
+
+        if (wslrR.rate <= minOther) wslrCheapest++;
+        else if (wslrR.rate >= maxOther) wslrMostExpensive++;
+        else wslrMidMarket++;
+
+        const deviation = (wslrR.rate - medianOther) / medianOther;
+        if (deviation < -0.15) opportunityDates.push({ ...d, wslrRate: wslrR.rate, medianOther, deviation });
+        if (deviation > 0.15) overpriceDates.push({ ...d, wslrRate: wslrR.rate, medianOther, deviation });
+      }
+      opportunityDates.sort((a, b) => a.deviation - b.deviation);
+      overpriceDates.sort((a, b) => b.deviation - a.deviation);
+
+      return { wslrCheapest, wslrMidMarket, wslrMostExpensive, wslrComparable, soldOutCount, opportunityDates, overpriceDates };
+    }
+
+    function renderLongRangeStats(allDates) {
+      const stats = calcLongRangeStats(allDates);
+      const wslr = wslrName();
+      const compProps = properties.filter(p => !p.is_wslr);
+      const pct = (n) => stats.wslrComparable ? Math.round(n / stats.wslrComparable * 100) : 0;
+
+      const soldOutSummary = compProps.map(p => `${p.name.split(' ')[0]}: ${stats.soldOutCount[p.name] || 0}`).join(' · ');
+
+      document.getElementById('longRangeStats').innerHTML = `
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+          <div class="bg-emerald-50 rounded-lg border border-emerald-200 p-4">
+            <div class="text-xs uppercase tracking-wide text-emerald-700">WSLR cheapest</div>
+            <div class="text-2xl font-bold mt-2 text-emerald-700">${pct(stats.wslrCheapest)}%</div>
+            <div class="text-xs text-slate-600 mt-1">${stats.wslrCheapest} of ${stats.wslrComparable} comparable dates</div>
+          </div>
+          <div class="bg-white rounded-lg border border-slate-200 p-4">
+            <div class="text-xs uppercase tracking-wide text-slate-500">WSLR mid-market</div>
+            <div class="text-2xl font-bold mt-2 text-slate-700">${pct(stats.wslrMidMarket)}%</div>
+            <div class="text-xs text-slate-500 mt-1">${stats.wslrMidMarket} dates between competitors</div>
+          </div>
+          <div class="bg-rose-50 rounded-lg border border-rose-200 p-4">
+            <div class="text-xs uppercase tracking-wide text-rose-700">WSLR priciest</div>
+            <div class="text-2xl font-bold mt-2 text-rose-700">${pct(stats.wslrMostExpensive)}%</div>
+            <div class="text-xs text-slate-600 mt-1">${stats.wslrMostExpensive} dates above all competitors</div>
+          </div>
+          <div class="bg-slate-100 rounded-lg border border-slate-200 p-4">
+            <div class="text-xs uppercase tracking-wide text-slate-600">Sold out nights</div>
+            <div class="text-2xl font-bold mt-2">${stats.soldOutCount[wslr] || 0}<span class="text-sm font-normal text-slate-500"> (WSLR)</span></div>
+            <div class="text-xs text-slate-500 mt-1">${soldOutSummary}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function getHeatmapColorFn(allDates, mode) {
+      if (mode === 'absolute') {
+        const rates = [];
+        allDates.forEach(d => properties.forEach(p => {
+          const r = d.props[p.name];
+          if (r && r.rate != null) rates.push(r.rate);
+        }));
+        if (rates.length === 0) return () => '#f8fafc';
+        // Use 5th/95th percentile to avoid outliers (e.g. $799) blowing out the scale
+        const sorted = [...rates].sort((a, b) => a - b);
+        const minR = sorted[Math.floor(sorted.length * 0.05)];
+        const maxR = sorted[Math.floor(sorted.length * 0.95)];
+        return (rate) => {
+          if (rate == null) return null;
+          const t = Math.max(0, Math.min(1, (rate - minR) / Math.max(1, maxR - minR)));
+          const hue = 130 - t * 130;
+          return `hsl(${hue}, 65%, 55%)`;
+        };
+      } else {
+        const medianByDate = {};
+        allDates.forEach(d => {
+          const r = properties.map(p => d.props[p.name]).filter(x => x && x.rate != null).map(x => x.rate).sort((a, b) => a - b);
+          if (r.length > 0) medianByDate[d.check_in] = r[Math.floor(r.length / 2)];
+        });
+        return (rate, dateStr) => {
+          if (rate == null) return null;
+          const med = medianByDate[dateStr];
+          if (!med) return '#e2e8f0';
+          const dev = (rate - med) / med;
+          const t = Math.max(-0.4, Math.min(0.4, dev)) / 0.4;
+          const hue = t < 0 ? 130 : 0;
+          const sat = Math.abs(t) * 60 + 20;
+          const light = 60 - Math.abs(t) * 10;
+          return `hsl(${hue}, ${sat}%, ${light}%)`;
+        };
+      }
+    }
+
+    function renderHeatmap(allDates) {
+      if (allDates.length === 0) {
+        document.getElementById('heatmapContainer').innerHTML = '<p class="text-sm text-slate-500">No long-range data yet.</p>';
+        return;
+      }
+      const mode = document.getElementById('heatmapMode').value;
+      const getColor = getHeatmapColorFn(allDates, mode);
+
+      // Group by month for header
+      const monthGroups = [];
+      let curMonth = null, curCount = 0;
+      for (const d of allDates) {
+        const dt = new Date(d.check_in + 'T00:00:00');
+        const key = dt.getFullYear() + '-' + dt.getMonth();
+        if (key !== curMonth) {
+          if (curMonth !== null) monthGroups.push({ key: curMonth, count: curCount });
+          curMonth = key; curCount = 1;
+        } else curCount++;
+      }
+      if (curMonth !== null) monthGroups.push({ key: curMonth, count: curCount });
+
+      const monthLabels = monthGroups.map(g => {
+        const [y, m] = g.key.split('-').map(Number);
+        const name = new Date(y, m, 1).toLocaleDateString('en-AU', { month: 'short', year: '2-digit' });
+        return `<div class="month-label" style="width: ${g.count * 18}px">${name}</div>`;
+      }).join('');
+
+      const dayLabels = allDates.map(d => {
+        const dt = new Date(d.check_in + 'T00:00:00');
+        const dow = dt.getDay();
+        const isWeekend = dow === 5 || dow === 6;
+        return `<div class="day-label ${isWeekend ? 'weekend' : ''}">${dt.getDate()}</div>`;
+      }).join('');
+
+      const propRows = properties.map(p => {
+        const cells = allDates.map(d => {
+          const r = d.props[p.name];
+          if (!r) return `<div class="heat-cell empty" title="${p.name} ${d.check_in}: no data"></div>`;
+          if (r.rate == null) return `<div class="heat-cell sold-out" title="${p.name} ${d.check_in}: sold out (${r.room_name || ''})"></div>`;
+          const color = getColor(r.rate, d.check_in);
+          return `<div class="heat-cell" style="background: ${color}" title="${p.name} ${fmtDate(d.check_in)}: AU$${Math.round(r.rate)}/n — ${r.room_name || ''}"></div>`;
+        }).join('');
+        return `<div class="heat-row">
+          <div class="row-label ${p.is_wslr ? 'wslr' : ''}">${p.name}${p.is_wslr ? ' (us)' : ''}</div>
+          <div class="cells-container">${cells}</div>
+        </div>`;
+      }).join('');
+
+      document.getElementById('heatmapContainer').innerHTML = `
+        <div class="heatmap-scroll border border-slate-200">
+          <div class="heatmap-inner">
+            <div class="heat-row header-row">
+              <div class="row-label"></div>
+              <div class="cells-container">${monthLabels}</div>
+            </div>
+            <div class="heat-row header-row">
+              <div class="row-label"></div>
+              <div class="cells-container">${dayLabels}</div>
+            </div>
+            ${propRows}
+          </div>
+        </div>
+      `;
+
+      // Legend
+      const legendHtml = mode === 'absolute'
+        ? `<span class="legend-swatch" style="background:hsl(130,65%,55%)"></span>cheaper
+           <span class="legend-swatch ml-3" style="background:hsl(65,65%,55%)"></span>mid
+           <span class="legend-swatch ml-3" style="background:hsl(0,65%,55%)"></span>expensive
+           <span class="legend-swatch ml-3" style="background:#1e293b"></span>sold out`
+        : `<span class="legend-swatch" style="background:hsl(130,60%,50%)"></span>cheaper than market
+           <span class="legend-swatch ml-3" style="background:hsl(0,0%,60%)"></span>at market
+           <span class="legend-swatch ml-3" style="background:hsl(0,60%,50%)"></span>above market
+           <span class="legend-swatch ml-3" style="background:#1e293b"></span>sold out`;
+      document.getElementById('heatmapLegend').innerHTML = legendHtml;
+    }
+
+    function renderInsights(allDates) {
+      const stats = calcLongRangeStats(allDates);
+      const top = (arr, n) => arr.slice(0, n);
+
+      const fmtItem = (d, color, sign) => `
+        <div class="flex justify-between text-sm py-2 border-b border-slate-100">
+          <div>
+            <div class="font-medium">${fmtDate(d.check_in)}</div>
+            <div class="text-xs text-slate-500 capitalize">${d.stayType || ''}</div>
+          </div>
+          <div class="text-right ${color}">
+            <div class="font-semibold">AU$${Math.round(d.wslrRate)} <span class="text-xs text-slate-500">vs AU$${Math.round(d.medianOther)} market</span></div>
+            <div class="text-xs">${sign}${(d.deviation * 100).toFixed(0)}%</div>
+          </div>
+        </div>
+      `;
+
+      const oppList = top(stats.opportunityDates, 8).map(d => fmtItem(d, 'text-emerald-700', '')).join('')
+        || '<p class="text-sm text-slate-500 py-3">No dates where WSLR is significantly cheaper than market.</p>';
+      const overList = top(stats.overpriceDates, 8).map(d => fmtItem(d, 'text-rose-700', '+')).join('')
+        || '<p class="text-sm text-slate-500 py-3">No dates where WSLR is significantly above market.</p>';
+
+      document.getElementById('insightsContainer').innerHTML = `
+        <div class="grid md:grid-cols-2 gap-6">
+          <div>
+            <h4 class="font-semibold text-sm mb-1 text-emerald-700">Possible rate-rise candidates</h4>
+            <p class="text-xs text-slate-500 mb-2">Dates where WSLR is more than 15% below the market median — competitors might be capturing demand we're underpricing.</p>
+            <div class="border border-slate-200 rounded p-3 bg-slate-50">${oppList}</div>
+          </div>
+          <div>
+            <h4 class="font-semibold text-sm mb-1 text-rose-700">Possible overpricing</h4>
+            <p class="text-xs text-slate-500 mb-2">Dates where WSLR is more than 15% above the market median — we may be losing bookings to cheaper competitors.</p>
+            <div class="border border-slate-200 rounded p-3 bg-slate-50">${overList}</div>
+          </div>
+        </div>
+      `;
+    }
+
     function setUnit(u) {
       unit = u;
       document.getElementById('btnPerNight').className = 'px-4 py-2 rounded-md font-medium text-sm ' + (u === 'perNight' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-300 text-slate-700');
@@ -383,6 +694,10 @@
     }
     document.getElementById('btnPerNight').addEventListener('click', () => setUnit('perNight'));
     document.getElementById('btnTotal').addEventListener('click', () => setUnit('total'));
+    document.getElementById('heatmapMode').addEventListener('change', () => {
+      const { allDates } = buildDateMap();
+      renderHeatmap(allDates);
+    });
 
     load();
   </script>
