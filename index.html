@@ -118,6 +118,12 @@
       const d = new Date(s + 'T00:00:00');
       return d.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'short' });
     }
+    function fmtYMD(d) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    }
     function nightsBetween(checkIn, checkOut) { return (new Date(checkOut) - new Date(checkIn)) / 86400000; }
     function displayRate(perNightRate, checkIn, checkOut) {
       if (perNightRate == null) return null;
@@ -182,7 +188,7 @@
     function closeAdmin() {
       document.getElementById('adminModal').classList.add('hidden');
       document.getElementById('adminModal').classList.remove('flex');
-      load(); // refresh dashboard data
+      load();
     }
     async function renderPropertyList() {
       const { data, error } = await sb
@@ -211,7 +217,6 @@
         urlInput.addEventListener('input', () => {
           const slug = parseBookingUrl(urlInput.value);
           if (slug && !nameInput.value) {
-            // Auto-fill: convert slug to a title-cased display name as a starting point
             nameInput.value = slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
           }
         });
@@ -261,7 +266,6 @@
 
     // ---------- Data ----------
     async function load() {
-      // Properties first (drives the column order and identifies WSLR)
       const { data: props, error: pErr } = await sb
         .from('competitor_properties')
         .select('*')
@@ -270,13 +274,20 @@
       if (pErr) { document.getElementById('lastUpdated').textContent = 'Error loading properties: ' + pErr.message; return; }
       properties = props || [];
 
-      // Rates
-      const since = new Date(Date.now() - 30 * 86400000).toISOString();
+      // Query the next 30 days of check-in dates. Filtering this way keeps the
+      // result set small (a few hundred rows) and well under Supabase's default
+      // 1000-row query limit, regardless of how much history is in the table.
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const futureDate = new Date(today);
+      futureDate.setDate(futureDate.getDate() + 30);
       const { data, error } = await sb
         .from('competitor_room_rates')
         .select('*')
-        .gte('scraped_at', since)
-        .order('scraped_at', { ascending: false });
+        .gte('check_in', fmtYMD(today))
+        .lte('check_in', fmtYMD(futureDate))
+        .order('check_in', { ascending: true })
+        .limit(5000);
       if (error) { document.getElementById('lastUpdated').textContent = 'Error loading rates: ' + error.message; return; }
       allRows = data || [];
       render();
