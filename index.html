@@ -19,7 +19,7 @@
     .modal-backdrop { background: rgba(15, 23, 42, 0.4); }
 
     /* Heatmap */
-    .heatmap-scroll { overflow-x: auto; border-radius: 8px; }
+    .heatmap-scroll { overflow-x: auto; border-radius: 8px; scroll-behavior: smooth; }
     .heatmap-inner { display: inline-block; min-width: 100%; }
     .heat-row { display: flex; align-items: stretch; }
     .heat-row .row-label {
@@ -63,10 +63,11 @@
         <h1 class="text-3xl font-bold tracking-tight">WSLR Competitor Tracker</h1>
         <p class="text-sm text-slate-500 mt-1" id="lastUpdated">Loading…</p>
       </div>
-      <div class="flex gap-2 items-center">
+      <div class="flex gap-2 items-center flex-wrap">
         <button id="btnPerNight" class="px-4 py-2 rounded-md font-medium text-sm bg-slate-900 text-white">Per night</button>
         <button id="btnTotal"    class="px-4 py-2 rounded-md font-medium text-sm bg-white border border-slate-300 text-slate-700">Stay total</button>
         <button onclick="openAdmin()" class="px-4 py-2 rounded-md font-medium text-sm bg-emerald-600 text-white">Manage properties</button>
+        <a href="https://github.com/Gjoel/wslr-comp-tracker/actions/workflows/scrape.yml" target="_blank" rel="noopener" class="px-4 py-2 rounded-md font-medium text-sm bg-amber-100 text-amber-900 border border-amber-300 hover:bg-amber-200">Run scrape ↗</a>
       </div>
     </header>
 
@@ -103,16 +104,29 @@
       <div class="p-6">
         <div id="longRangeStats"></div>
 
-        <div class="flex items-center justify-between mb-3 mt-2 flex-wrap gap-2">
-          <div>
-            <label class="text-xs uppercase tracking-wide text-slate-500 mr-2">Colour by</label>
-            <select id="heatmapMode" class="text-sm border border-slate-300 rounded px-2 py-1">
-              <option value="absolute">Absolute rate</option>
-              <option value="vsMedian">Deviation from market median</option>
-            </select>
+        <div class="flex items-center justify-between mb-3 mt-2 flex-wrap gap-3">
+          <div class="flex items-center gap-4 flex-wrap">
+            <div>
+              <span class="text-xs uppercase tracking-wide text-slate-500 mr-2">Range</span>
+              <span class="inline-flex gap-1 align-middle">
+                <button class="range-btn px-3 py-1 rounded text-xs font-medium bg-slate-900 text-white"           data-range="30"  onclick="setDateRange(30)">30d</button>
+                <button class="range-btn px-3 py-1 rounded text-xs font-medium bg-white border border-slate-300 text-slate-700" data-range="60"  onclick="setDateRange(60)">60d</button>
+                <button class="range-btn px-3 py-1 rounded text-xs font-medium bg-white border border-slate-300 text-slate-700" data-range="90"  onclick="setDateRange(90)">90d</button>
+                <button class="range-btn px-3 py-1 rounded text-xs font-medium bg-white border border-slate-300 text-slate-700" data-range="all" onclick="setDateRange('all')">All</button>
+              </span>
+            </div>
+            <div>
+              <label class="text-xs uppercase tracking-wide text-slate-500 mr-2">Colour by</label>
+              <select id="heatmapMode" class="text-sm border border-slate-300 rounded px-2 py-1">
+                <option value="absolute">Absolute rate</option>
+                <option value="vsMedian">Deviation from market median</option>
+              </select>
+            </div>
           </div>
           <div class="text-xs text-slate-500" id="heatmapLegend"></div>
         </div>
+
+        <div id="monthChips" class="flex flex-wrap gap-1.5 mb-3"></div>
 
         <div id="heatmapContainer"></div>
 
@@ -158,6 +172,7 @@
 
     const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     let unit = 'perNight';
+    let dateRangeDays = 30;  // 30, 60, 90, or 'all' — controls 6-month section only
     let allRows = [];
     let properties = [];
     let chart = null;
@@ -186,6 +201,10 @@
       return m ? m[1] : null;
     }
     function wslrName() { const w = properties.find(p => p.is_wslr); return w ? w.name : null; }
+    function getFilteredDates(allDates) {
+      if (dateRangeDays === 'all') return allDates;
+      return allDates.slice(0, dateRangeDays);
+    }
 
     // ---------- Admin ----------
     async function openAdmin() {
@@ -346,9 +365,16 @@
       renderTable(next14);
       renderChart(next14);
 
-      renderLongRangeStats(allDates);
-      renderHeatmap(allDates);
-      renderInsights(allDates);
+      renderLongRangeSection();
+    }
+
+    function renderLongRangeSection() {
+      const { allDates } = buildDateMap();
+      const filtered = getFilteredDates(allDates);
+      renderLongRangeStats(filtered);
+      renderMonthChips(filtered);
+      renderHeatmap(filtered);
+      renderInsights(filtered);
     }
 
     function renderHeader(rows) {
@@ -504,6 +530,7 @@
       const wslr = wslrName();
       const compProps = properties.filter(p => !p.is_wslr);
       const pct = (n) => stats.wslrComparable ? Math.round(n / stats.wslrComparable * 100) : 0;
+      const rangeLabel = dateRangeDays === 'all' ? 'all dates' : `next ${dateRangeDays} days`;
 
       const soldOutSummary = compProps.map(p => `${p.name.split(' ')[0]}: ${stats.soldOutCount[p.name] || 0}`).join(' · ');
 
@@ -512,7 +539,7 @@
           <div class="bg-emerald-50 rounded-lg border border-emerald-200 p-4">
             <div class="text-xs uppercase tracking-wide text-emerald-700">WSLR cheapest</div>
             <div class="text-2xl font-bold mt-2 text-emerald-700">${pct(stats.wslrCheapest)}%</div>
-            <div class="text-xs text-slate-600 mt-1">${stats.wslrCheapest} of ${stats.wslrComparable} comparable dates</div>
+            <div class="text-xs text-slate-600 mt-1">${stats.wslrCheapest} of ${stats.wslrComparable} comparable dates · ${rangeLabel}</div>
           </div>
           <div class="bg-white rounded-lg border border-slate-200 p-4">
             <div class="text-xs uppercase tracking-wide text-slate-500">WSLR mid-market</div>
@@ -569,6 +596,35 @@
           return `hsl(${hue}, ${sat}%, ${light}%)`;
         };
       }
+    }
+
+    function renderMonthChips(allDates) {
+      const container = document.getElementById('monthChips');
+      if (!container) return;
+      if (allDates.length === 0) { container.innerHTML = ''; return; }
+
+      const groups = [];
+      let curMonth = null, curCount = 0, startIdx = 0;
+      for (let i = 0; i < allDates.length; i++) {
+        const dt = new Date(allDates[i].check_in + 'T00:00:00');
+        const key = dt.getFullYear() + '-' + dt.getMonth();
+        if (key !== curMonth) {
+          if (curMonth !== null) groups.push({ key: curMonth, count: curCount, startIdx });
+          curMonth = key; curCount = 1; startIdx = i;
+        } else curCount++;
+      }
+      if (curMonth !== null) groups.push({ key: curMonth, count: curCount, startIdx });
+
+      container.innerHTML = groups.map(g => {
+        const [y, m] = g.key.split('-').map(Number);
+        const name = new Date(y, m, 1).toLocaleDateString('en-AU', { month: 'short', year: '2-digit' });
+        return `<button onclick="scrollHeatmapToDay(${g.startIdx})" class="px-2.5 py-1 text-xs rounded border border-slate-300 bg-white hover:bg-slate-100 font-medium text-slate-700">${name}</button>`;
+      }).join('');
+    }
+
+    function scrollHeatmapToDay(dayIdx) {
+      const scroller = document.querySelector('.heatmap-scroll');
+      if (scroller) scroller.scrollTo({ left: dayIdx * 18, behavior: 'smooth' });
     }
 
     function renderHeatmap(allDates) {
@@ -692,11 +748,22 @@
       document.getElementById('btnTotal').className = 'px-4 py-2 rounded-md font-medium text-sm ' + (u === 'total' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-300 text-slate-700');
       render();
     }
+
+    function setDateRange(d) {
+      dateRangeDays = d;
+      document.querySelectorAll('.range-btn').forEach(b => {
+        const isActive = b.dataset.range === String(d);
+        b.className = 'range-btn px-3 py-1 rounded text-xs font-medium ' +
+          (isActive ? 'bg-slate-900 text-white' : 'bg-white border border-slate-300 text-slate-700');
+      });
+      renderLongRangeSection();
+    }
+
     document.getElementById('btnPerNight').addEventListener('click', () => setUnit('perNight'));
     document.getElementById('btnTotal').addEventListener('click', () => setUnit('total'));
     document.getElementById('heatmapMode').addEventListener('change', () => {
       const { allDates } = buildDateMap();
-      renderHeatmap(allDates);
+      renderHeatmap(getFilteredDates(allDates));
     });
 
     load();
