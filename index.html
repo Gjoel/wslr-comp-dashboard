@@ -30,7 +30,7 @@
       <div class="flex gap-2 items-center">
         <button id="btnPerNight" class="px-4 py-2 rounded-md font-medium text-sm bg-slate-900 text-white">Per night</button>
         <button id="btnTotal"    class="px-4 py-2 rounded-md font-medium text-sm bg-white border border-slate-300 text-slate-700">Stay total</button>
-        <span id="authArea" class="ml-2"></span>
+        <button onclick="openAdmin()" class="px-4 py-2 rounded-md font-medium text-sm bg-emerald-600 text-white">Manage properties</button>
       </div>
     </header>
 
@@ -58,20 +58,6 @@
     <footer class="text-center text-xs text-slate-400 mt-8 pb-8">
       Data scraped weekly from booking.com · WSLR internal tool
     </footer>
-  </div>
-
-  <!-- Sign-in modal -->
-  <div id="signInModal" class="fixed inset-0 modal-backdrop hidden items-center justify-center z-50">
-    <div class="bg-white rounded-lg shadow-xl max-w-md w-full p-6 m-4">
-      <h3 class="text-lg font-semibold mb-2">Sign in</h3>
-      <p class="text-sm text-slate-600 mb-4">Enter your email — we'll send you a magic link.</p>
-      <input id="signInEmail" type="email" placeholder="you@example.com" class="w-full border border-slate-300 rounded px-3 py-2 mb-4 text-sm">
-      <div id="signInMsg" class="text-sm mb-4 hidden"></div>
-      <div class="flex justify-end gap-2">
-        <button onclick="closeSignIn()" class="px-4 py-2 rounded text-sm text-slate-600 hover:bg-slate-100">Cancel</button>
-        <button onclick="sendMagicLink()" class="px-4 py-2 rounded bg-slate-900 text-white text-sm font-medium">Send link</button>
-      </div>
-    </div>
   </div>
 
   <!-- Admin modal -->
@@ -109,7 +95,6 @@
     let unit = 'perNight';
     let allRows = [];
     let properties = [];
-    let session = null;
     let chart = null;
 
     // ---------- Helpers ----------
@@ -134,50 +119,6 @@
       const m = (url || '').match(/booking\.com\/hotel\/[a-z]{2}\/([a-z0-9\-]+)\./i);
       return m ? m[1] : null;
     }
-
-    // ---------- Auth ----------
-    async function refreshAuth() {
-      const { data } = await sb.auth.getSession();
-      session = data.session;
-      renderAuthArea();
-    }
-    function renderAuthArea() {
-      const el = document.getElementById('authArea');
-      if (session) {
-        el.innerHTML = `
-          <button onclick="openAdmin()" class="px-4 py-2 rounded-md font-medium text-sm bg-emerald-600 text-white">Manage properties</button>
-          <button onclick="signOut()" class="ml-2 text-sm text-slate-500 hover:text-slate-800">Sign out</button>
-        `;
-      } else {
-        el.innerHTML = `<button onclick="openSignIn()" class="px-4 py-2 rounded-md font-medium text-sm bg-white border border-slate-300 text-slate-700">Sign in</button>`;
-      }
-    }
-    function openSignIn() { document.getElementById('signInModal').classList.remove('hidden'); document.getElementById('signInModal').classList.add('flex'); }
-    function closeSignIn() { document.getElementById('signInModal').classList.add('hidden'); document.getElementById('signInModal').classList.remove('flex'); document.getElementById('signInMsg').classList.add('hidden'); }
-    async function sendMagicLink() {
-      const email = document.getElementById('signInEmail').value.trim();
-      const msg = document.getElementById('signInMsg');
-      msg.classList.remove('hidden');
-      msg.className = 'text-sm mb-4 text-slate-600';
-      msg.textContent = 'Sending…';
-      const { error } = await sb.auth.signInWithOtp({
-        email,
-        options: { emailRedirectTo: window.location.origin + window.location.pathname },
-      });
-      if (error) {
-        msg.className = 'text-sm mb-4 text-rose-600';
-        msg.textContent = error.message;
-      } else {
-        msg.className = 'text-sm mb-4 text-emerald-600';
-        msg.textContent = 'Check your email and click the link to sign in.';
-      }
-    }
-    async function signOut() {
-      await sb.auth.signOut();
-      session = null;
-      renderAuthArea();
-    }
-    sb.auth.onAuthStateChange((_event, newSession) => { session = newSession; renderAuthArea(); });
 
     // ---------- Admin ----------
     async function openAdmin() {
@@ -274,9 +215,6 @@
       if (pErr) { document.getElementById('lastUpdated').textContent = 'Error loading properties: ' + pErr.message; return; }
       properties = props || [];
 
-      // Query the next 30 days of check-in dates. Filtering this way keeps the
-      // result set small (a few hundred rows) and well under Supabase's default
-      // 1000-row query limit, regardless of how much history is in the table.
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const futureDate = new Date(today);
@@ -446,7 +384,6 @@
     document.getElementById('btnPerNight').addEventListener('click', () => setUnit('perNight'));
     document.getElementById('btnTotal').addEventListener('click', () => setUnit('total'));
 
-    refreshAuth();
     load();
   </script>
 </body>
